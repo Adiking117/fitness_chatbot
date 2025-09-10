@@ -26,71 +26,109 @@ llm = ChatGroq(model="llama-3.1-8b-instant")
 # Tools
 search_tool = DuckDuckGoSearchRun(region="us-en") # type: ignore
 
-# Store your RapidAPI key in .env for security
-RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
-RAPIDAPI_HOST = "real-time-amazon-data.p.rapidapi.com"
+# Store your credentials in .env
+NUTRITIONIX_APP_ID = os.getenv("NUTRITIONIX_APP_ID")
+NUTRITIONIX_APP_KEY = os.getenv("NUTRITIONIX_APP_KEY")
 
-@tool("amazon_product_search")
-def amazon_product_search(
-    query: str,
-    page: str = "1",
-    country: str = "US",
-    sort_by: str = "RELEVANCE",
-    product_condition: str = "ALL",
-    is_prime: str = "false",
-    deals_and_discounts: str = "NONE",
-) -> dict:
+from langchain_core.tools import tool
+import requests
+import os
+
+# Credentials
+NUTRITIONIX_APP_ID = os.getenv("NUTRITIONIX_APP_ID")
+NUTRITIONIX_APP_KEY = os.getenv("NUTRITIONIX_APP_KEY")
+
+BASE_URL = "https://trackapi.nutritionix.com/v2"
+
+HEADERS = {
+    "Content-Type": "application/json",
+    "x-app-id": NUTRITIONIX_APP_ID,
+    "x-app-key": NUTRITIONIX_APP_KEY
+}
+
+# 1️⃣ Instant Search Tool
+@tool
+def nutritionix_instant_search(query: str) -> dict:
     """
-    Search Amazon for products by keyword and return structured details.
+    Step 1: Search Nutritionix for foods by name.
+    Returns only 2 unique common + 2 unique branded items.
     """
-
-    # --- Coerce types ---
     try:
-        page = int(page) # type: ignore
-    except ValueError:
-        page = 1 # type: ignore
+        resp = requests.get(f"{BASE_URL}/search/instant", headers=HEADERS, params={"query": query}, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
 
-    is_prime = str(is_prime).lower() in ["true", "1", "yes"] # type: ignore
+        # Filter common by tag_id
+        seen_tag_ids = set()
+        common_filtered = []
+        for item in data.get("common", []):
+            tag_id = item.get("tag_id")
+            if tag_id and tag_id not in seen_tag_ids:
+                seen_tag_ids.add(tag_id)
+                common_filtered.append({
+                    "food_name": item.get("food_name"),
+                    "serving_unit": item.get("serving_unit"),
+                    "serving_qty": item.get("serving_qty"),
+                    "tag_id": tag_id,
+                    "image": item.get("photo", {}).get("thumb")
+                })
+            if len(common_filtered) >= 2:
+                break
 
-    url = f"https://{RAPIDAPI_HOST}/search"
-    params = {
-        "query": query,
-        "page": str(page),
-        "country": country,
-        "sort_by": sort_by,
-        "product_condition": product_condition,
-        "is_prime": str(is_prime).lower(),
-        "deals_and_discounts": deals_and_discounts,
-    }
-    headers = {
-        "x-rapidapi-key": RAPIDAPI_KEY,
-        "x-rapidapi-host": RAPIDAPI_HOST,
-    }
+        # Limit branded to 2
+        branded_filtered = []
+        for item in data.get("branded", []):
+            branded_filtered.append({
+                "food_name": item.get("food_name"),
+                "brand_name": item.get("brand_name"),
+                "serving_unit": item.get("serving_unit"),
+                "serving_qty": item.get("serving_qty"),
+                "calories": item.get("nf_calories"),
+                "nix_item_id": item.get("nix_item_id"),
+                "image": item.get("photo", {}).get("thumb")
+            })
+            if len(branded_filtered) >= 2:
+                break
 
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-
-        products = [
-            {
-                "title": item.get("product_title"),
-                "price": item.get("product_price"),
-                "currency": item.get("currency"),
-                "rating": item.get("product_star_rating"),
-                "reviews": item.get("product_num_ratings"),
-                "image": item.get("product_photo"),
-                "link": item.get("product_url"),
-            }
-            for item in data.get("data", {}).get("products", [])
-        ]
-
-        return {"results": products[:5]}
+        return {"common": common_filtered, "branded": branded_filtered}
 
     except requests.exceptions.RequestException as e:
         return {"error": str(e)}
 
-tools = [search_tool,amazon_product_search]
+
+# 2️⃣ Item Details Tool
+@tool
+def nutritionix_item_details(nix_item_id: str) -> dict:
+    """
+    Step 2: Get full nutrition details for a branded food using nix_item_id.
+    """
+    try:
+        resp = requests.get(f"{BASE_URL}/search/item", headers=HEADERS, params={"nix_item_id": nix_item_id}, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if not data.get("foods"):
+            return {"error": "No details found."}
+
+        item = data["foods"][0]
+        return {
+            "food_name": item.get("food_name"),
+            "brand_name": item.get("brand_name"),
+            "serving_size": f"{item.get('serving_qty')} {item.get('serving_unit')}",
+            "calories": item.get("nf_calories"),
+            "total_fat": item.get("nf_total_fat"),
+            "sodium_mg": item.get("nf_sodium"),
+            "carbohydrates": item.get("nf_total_carbohydrate"),
+            "protein": item.get("nf_protein"),
+            "ingredients": item.get("nf_ingredient_statement"),
+            "image": item.get("photo", {}).get("thumb")
+        }
+
+    except requests.exceptions.RequestException as e:
+        return {"error": str(e)}
+
+
+tools = [search_tool,nutritionix_item_details,nutritionix_instant_search]
 llm_with_tools = llm.bind_tools(tools)
 
 # -------------------
