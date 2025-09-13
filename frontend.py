@@ -1,8 +1,10 @@
 import streamlit as st
-from backend import chatbot, retrieve_all_threads
+from backend import chatbot,checkpointer
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 import uuid
 from datetime import datetime
+from utils.threads import retrieve_all_threads
+
 
 # **************************************** Utility Functions *************************
 
@@ -49,7 +51,7 @@ if 'thread_id' not in st.session_state:
     st.session_state['thread_id'] = generate_thread_id()
 
 if 'chat_threads' not in st.session_state:
-    st.session_state['chat_threads'] = retrieve_all_threads()
+    st.session_state['chat_threads'] = retrieve_all_threads(checkpointer)
 
 if 'tool_log' not in st.session_state:
     st.session_state['tool_log'] = {}
